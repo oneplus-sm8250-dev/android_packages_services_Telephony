@@ -44,6 +44,8 @@ import android.telecom.VideoProfile;
 import android.telephony.CarrierConfigManager;
 import android.telephony.DisconnectCause;
 import android.telephony.PhoneNumberUtils;
+import android.telephony.SubscriptionInfo;
+import android.telephony.SubscriptionManager;
 import android.telephony.ServiceState;
 import android.telephony.ServiceState.RilRadioTechnology;
 import android.telephony.SubscriptionManager;
@@ -56,6 +58,7 @@ import android.telephony.ims.RtpHeaderExtensionType;
 import android.text.TextUtils;
 import android.util.ArraySet;
 import android.util.Pair;
+import android.widget.Toast;
 
 import com.android.ims.ImsCall;
 import com.android.ims.ImsException;
@@ -90,6 +93,9 @@ import com.android.phone.callcomposer.CallComposerPictureManager;
 import com.android.phone.callcomposer.CallComposerPictureTransfer;
 import com.android.telephony.Rlog;
 
+import org.codeaurora.ims.QtiCallConstants;
+import org.codeaurora.ims.utils.QtiImsExtUtils;
+
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -105,7 +111,8 @@ import java.util.stream.Collectors;
 /**
  * Base class for CDMA and GSM connections.
  */
-abstract class TelephonyConnection extends Connection implements Holdable, Communicator.Callback {
+abstract class TelephonyConnection extends Connection implements Holdable,
+          Communicator.Callback, TelephonyConnectionService.ConnectionRemovedListener {
     private static final String LOG_TAG = "TelephonyConnection";
 
     private static final int MSG_PRECISE_CALL_STATE_CHANGED = 1;
@@ -141,12 +148,23 @@ abstract class TelephonyConnection extends Connection implements Holdable, Commu
     private static final int MSG_REJECT = 21;
     private static final int MSG_DTMF_DONE = 22;
     private static final int MSG_MEDIA_ATTRIBUTES_CHANGED = 23;
+    private static final int MSG_CONNECTION_REMOVED = 24;
 
     private static final String JAPAN_COUNTRY_CODE_WITH_PLUS_SIGN = "+81";
     private static final String JAPAN_ISO_COUNTRY_CODE = "JP";
 
     private List<Uri> mParticipants;
     private boolean mIsAdhocConferenceCall;
+
+    private boolean mIsEmergencyNumber = false;
+
+    private SuppServiceNotification mSsNotification = null;
+
+    /* Flag indicates if context based swap is disabled
+     * @param true means DSDA specific APIs should be invoked
+     * @param false means ImsPhoneCallTracker can use context to swap (legacy behavior)
+     */
+    private boolean mContextBasedSwapDisabled = false;
 
     private final Handler mHandler = new Handler(Looper.getMainLooper()) {
         @Override
@@ -199,8 +217,15 @@ abstract class TelephonyConnection extends Connection implements Holdable, Commu
                     Log.v(TelephonyConnection.this, "MSG_SUPP_SERVICE_NOTIFY on phoneId : "
                             + (phone != null ? Integer.toString(phone.getPhoneId())
                             : "null"));
-                    SuppServiceNotification mSsNotification = null;
+                    if (phone == null) {
+                        break;
+                    }
                     if (msg.obj != null && ((AsyncResult) msg.obj).result != null) {
+                        if (mOriginalConnection != null && ((SuppServiceNotification)((AsyncResult)
+                                msg.obj).result).history != null && !(mConnectionState ==
+                                Call.State.DIALING || mConnectionState == Call.State.ALERTING)) {
+                           return;
+                        }
                         mSsNotification =
                                 (SuppServiceNotification)((AsyncResult) msg.obj).result;
                         if (mOriginalConnection != null) {
@@ -294,6 +319,11 @@ abstract class TelephonyConnection extends Connection implements Holdable, Commu
                 case MSG_DTMF_DONE:
                     Log.i(this, "MSG_DTMF_DONE");
                     break;
+                case MSG_CONNECTION_REMOVED:
+                    Log.d(this, "MSG_CONNECTION_REMOVED");
+                    // Some connection has disconnected. Re fresh disable add call property.
+                    refreshDisableAddCall();
+                    break;
 
                 case MSG_SET_CALL_RADIO_TECH:
                     int vrat = (int) msg.obj;
@@ -359,6 +389,24 @@ abstract class TelephonyConnection extends Connection implements Holdable, Commu
                         + mOriginalConnection.toString()
                         + ", new original connection="
                         + connection.toString());
+                boolean isShowToast = false;
+                Phone phone = getPhone();
+                if (phone != null) {
+                    CarrierConfigManager cfgManager = (CarrierConfigManager) phone
+                            .getContext().getSystemService(Context
+                            .CARRIER_CONFIG_SERVICE);
+                    if (cfgManager != null) {
+                        isShowToast = cfgManager.getConfigForSubId(phone.getSubId())
+                                .getBoolean("config_show_srvcc_toast");
+                    }
+                }
+                if (isShowToast && !shouldTreatAsEmergencyCall()) {
+                    int srvccMessageRes = VideoProfile.isVideo(
+                            mOriginalConnection.getVideoState()) ?
+                            R.string.srvcc_video_message : R.string.srvcc_message;
+                    Toast.makeText(phone.getContext(),
+                            srvccMessageRes, Toast.LENGTH_LONG).show();
+                }
                 setOriginalConnection(connection);
                 mWasImsConnection = false;
                 if (mHangupDisconnectCause != DisconnectCause.NOT_VALID) {
@@ -404,11 +452,23 @@ abstract class TelephonyConnection extends Connection implements Holdable, Commu
      * @param code the {@link SuppServiceNotification#code}.
      */
     private void sendSuppServiceNotificationEvent(int type, int code) {
+       CharSequence notificationMessage = getSuppServiceMessage(type, code);
+       if (notificationMessage == null || notificationMessage.length() == 0) {
+           return;
+       }
+
+       if (TelephonyManager.getDefault().getPhoneCount() > 1) {
+           SubscriptionInfo sub = SubscriptionManager.from(getPhone().getContext())
+                   .getActiveSubscriptionInfoForSimSlotIndex(getPhone().getPhoneId());
+           if (sub != null && !TextUtils.isEmpty(sub.getDisplayName().toString())) {
+               notificationMessage = sub.getDisplayName().toString() + ":" + notificationMessage;
+           }
+        }
+
         Bundle extras = new Bundle();
         extras.putInt(TelephonyManager.EXTRA_NOTIFICATION_TYPE, type);
         extras.putInt(TelephonyManager.EXTRA_NOTIFICATION_CODE, code);
-        extras.putCharSequence(TelephonyManager.EXTRA_NOTIFICATION_MESSAGE,
-                getSuppServiceMessage(type, code));
+        extras.putCharSequence(TelephonyManager.EXTRA_NOTIFICATION_MESSAGE, notificationMessage);
         sendTelephonyConnectionEvent(TelephonyManager.EVENT_SUPPLEMENTARY_SERVICE_NOTIFICATION,
                 extras);
     }
@@ -1269,13 +1329,27 @@ abstract class TelephonyConnection extends Connection implements Holdable, Commu
     public void performAnswer(int videoState) {
         Log.v(this, "performAnswer");
         if (isValidRingingCall() && getPhone() != null) {
-            try {
-                mTelephonyConnectionService.maybeDisconnectCallsOnOtherSubs(
+            if (TelephonyManager.isConcurrentCallsPossible()) {
+                // Disconnect dialing call when incoming call is accepted.
+                // Follow AOSP's approach for now. TODO:answer after disconnect completes
+                mTelephonyConnectionService.maybeDisconnectDialingCallsOnOtherSubs(
                         getPhoneAccountHandle());
+            } else {
+                mTelephonyConnectionService.maybeDisconnectCallsOnOtherSubs(
+                            getPhoneAccountHandle());
+            }
+            try {
                 getPhone().acceptCall(videoState);
             } catch (CallStateException e) {
                 Log.e(this, e, "Failed to accept call.");
             }
+        }
+    }
+
+    @Override
+    public void onConnectionRemoved(TelephonyConnection conn) {
+        if (conn != this) {
+            mHandler.obtainMessage(MSG_CONNECTION_REMOVED).sendToTarget();
         }
     }
 
@@ -1304,7 +1378,14 @@ abstract class TelephonyConnection extends Connection implements Holdable, Commu
                     // New behavior for IMS -- don't use the clunky switchHoldingAndActive logic.
                     if (phone.getPhoneType() == PhoneConstants.PHONE_TYPE_IMS) {
                         ImsPhone imsPhone = (ImsPhone) phone;
-                        imsPhone.holdActiveCall();
+                        if (isContextBasedSwapDisabled()) {
+                            // Invoke new API for DSDA only. This API makes sure that the
+                            // connection is only held and not swapped if there is another held
+                            // connection on that sub
+                            imsPhone.holdActiveCallOnly();
+                        } else {
+                            imsPhone.holdActiveCall();
+                        }
                         return;
                     }
                     phone.switchHoldingAndActive();
@@ -1327,7 +1408,20 @@ abstract class TelephonyConnection extends Connection implements Holdable, Commu
                 // New behavior for IMS -- don't use the clunky switchHoldingAndActive logic.
                 if (phone.getPhoneType() == PhoneConstants.PHONE_TYPE_IMS) {
                     ImsPhone imsPhone = (ImsPhone) phone;
-                    imsPhone.unholdHeldCall();
+                    if (isContextBasedSwapDisabled()) {
+                        if (hasActiveCallOnThisSub(imsPhone)) {
+                            // Same sub swap use case: Mimic CallsManager behavior of calling hold
+                            // and letting ImsPhoneCallTracker manage swap
+                            imsPhone.holdActiveCall();
+                        } else {
+                            // Unhold specific connection in single unhold or across sub swap use
+                            // case where hold already has been completed by
+                            // TelephonyConnectionService
+                            imsPhone.unholdHeldCall((ImsPhoneConnection)mOriginalConnection);
+                        }
+                    } else { // legacy unhold
+                        imsPhone.unholdHeldCall();
+                    }
                     return;
                 }
                 // Here's the deal--Telephony hold/unhold is weird because whenever there exists
@@ -1521,12 +1615,6 @@ abstract class TelephonyConnection extends Connection implements Holdable, Commu
                 setCallerDisplayName(name, namePresentation);
             }
 
-            TelephonyManager tm = (TelephonyManager) getPhone().getContext()
-                    .getSystemService(Context.TELEPHONY_SERVICE);
-            if (tm.isEmergencyNumber(mOriginalConnection.getAddress())) {
-                mTreatAsEmergencyCall = true;
-            }
-
             // Changing the address of the connection can change whether it is an emergency call or
             // not, which can impact whether it can be part of a conference.
             refreshConferenceSupported();
@@ -1574,7 +1662,9 @@ abstract class TelephonyConnection extends Connection implements Holdable, Commu
         mOriginalConnectionExtras.clear();
         mOriginalConnection = originalConnection;
         mOriginalConnection.setTelecomCallId(getTelecomCallId());
-        registerForCallEvents(getPhone());
+        if (getPhone() != null) {
+            registerForCallEvents(getPhone());
+        }
 
         mOriginalConnection.addPostDialListener(mPostDialListener);
         mOriginalConnection.addListener(mOriginalConnectionListener);
@@ -1606,22 +1696,33 @@ abstract class TelephonyConnection extends Connection implements Holdable, Commu
         // Propagate VERSTAT for IMS calls.
         setCallerNumberVerificationStatus(mOriginalConnection.getNumberVerificationStatus());
 
+        Bundle extrasToPut = new Bundle();
+        List<String> extrasToRemove = new ArrayList<>();
+
         if (isImsConnection()) {
             mWasImsConnection = true;
+        } else {
+            extrasToRemove.add(QtiImsExtUtils.QTI_IMS_PHONE_ID_EXTRA_KEY);
+            extrasToRemove.add(QtiImsExtUtils.EXTRA_TIR_OVERWRITE_ALLOWED);
+            extrasToRemove.add(QtiCallConstants.ORIENTATION_MODE_EXTRA_KEY);
+            extrasToRemove.add(QtiCallConstants.EXTRAS_CALL_PROGRESS_INFO_TYPE);
+            extrasToRemove.add(QtiCallConstants.EXTRAS_CALL_PROGRESS_REASON_CODE);
+            extrasToRemove.add(QtiCallConstants.EXTRAS_CALL_PROGRESS_REASON_TEXT);
+            extrasToRemove.add(QtiCallConstants.EXTRA_CRS_TYPE);
+            extrasToRemove.add(QtiCallConstants.EXTRA_ORIGINAL_CALL_TYPE);
+            extrasToRemove.add(QtiCallConstants.EXTRA_IS_PREPARATORY);
         }
         if (originalConnection instanceof ImsPhoneConnection) {
             maybeConfigureDeviceToDeviceCommunication();
         }
         mIsMultiParty = mOriginalConnection.isMultiparty();
 
-        Bundle extrasToPut = new Bundle();
         // Also stash the number verification status in a hidden extra key in the connection.
         // We do this because a RemoteConnection DOES NOT include a getNumberVerificationStatus
         // method and we need to be able to pass the number verification status up to Telecom
         // despite the missing pathway in the RemoteConnectionService API surface.
         extrasToPut.putInt(Connection.EXTRA_CALLER_NUMBER_VERIFICATION_STATUS,
                 mOriginalConnection.getNumberVerificationStatus());
-        List<String> extrasToRemove = new ArrayList<>();
         if (mOriginalConnection.isActiveCallDisconnectedOnAnswer()) {
             extrasToPut.putBoolean(Connection.EXTRA_ANSWERING_DROPS_FG_CALL, true);
         } else {
@@ -1779,6 +1880,21 @@ abstract class TelephonyConnection extends Connection implements Holdable, Commu
         }
     }
 
+    private void maybeRemoveAnsweringDropsFgCallExtra() {
+        if(mOriginalConnection == null || !mOriginalConnection.isActiveCallDisconnectedOnAnswer()) {
+            return;
+        }
+
+        Call.State state = mOriginalConnection.getState();
+
+        if (state == Call.State.INCOMING || state == Call.State.WAITING) {
+            return;
+        }
+
+        Log.v(TelephonyConnection.this, "maybeRemoveAnsweringDropsFgCallExtra removing extra");
+        removeExtras(Connection.EXTRA_ANSWERING_DROPS_FG_CALL);
+    }
+
     private int transformCodec(int codec) {
         switch (codec) {
             case ImsStreamMediaProfile.AUDIO_QUALITY_NONE:
@@ -1844,13 +1960,21 @@ abstract class TelephonyConnection extends Connection implements Holdable, Commu
         boolean wasVideoCall = false;
         boolean isVowifiEnabled = false;
         if (phone instanceof ImsPhone) {
-            ImsPhoneCall foregroundCall = ((ImsPhone) phone).getForegroundCall();
-            if (foregroundCall != null) {
-                ImsCall call = foregroundCall.getImsCall();
-                if (call != null) {
-                    isCurrentVideoCall = call.isVideoCall();
-                    wasVideoCall = call.wasVideoCall();
-                }
+            ImsPhone imsPhone = (ImsPhone) phone;
+            ImsCall call = null;
+            if (imsPhone.getForegroundCall() != null
+                    && imsPhone.getForegroundCall().getImsCall() != null) {
+                call = imsPhone.getForegroundCall().getImsCall();
+            } else if (imsPhone.getBackgroundCall() != null
+                    && imsPhone.getBackgroundCall().getImsCall() != null) {
+                call = imsPhone.getBackgroundCall().getImsCall();
+            } else if (imsPhone.getRingingCall() != null
+                    && imsPhone.getRingingCall().getImsCall() != null) {
+                call = imsPhone.getRingingCall().getImsCall();
+            }
+            if (call != null) {
+                isCurrentVideoCall = call.isVideoCall();
+                wasVideoCall = call.wasVideoCall();
             }
 
             isVowifiEnabled = isWfcEnabled(phone);
@@ -2069,7 +2193,8 @@ abstract class TelephonyConnection extends Connection implements Holdable, Commu
             for (Connection current : getTelephonyConnectionService().getAllConnections()) {
                 if (current != this && current instanceof TelephonyConnection) {
                     TelephonyConnection other = (TelephonyConnection) current;
-                    if (canTransfer(other)) {
+                    if ((getPhone().getSubId() == other.getPhone().getSubId()) &&
+                            canTransfer(other)) {
                         canConsultativeTransfer = true;
                         break;
                     }
@@ -2144,6 +2269,10 @@ abstract class TelephonyConnection extends Connection implements Holdable, Commu
     @VisibleForTesting
     public void hangup(int telephonyDisconnectCode) {
         if (mOriginalConnection != null) {
+            if (mHangupDisconnectCause != DisconnectCause.NOT_VALID) {
+                Log.i(this, "hangup already called once");
+                return;
+            }
             mHangupDisconnectCause = telephonyDisconnectCode;
             try {
                 // Hanging up a ringing call requires that we invoke call.hangup() as opposed to
@@ -2337,7 +2466,7 @@ abstract class TelephonyConnection extends Connection implements Holdable, Commu
                     // Ensure extras are propagated to Telecom.
                     putTelephonyExtras(mOriginalConnectionExtras);
                     // If extras contain Conference support information,
-                    // then ensure capabilities are updated.
+                    // then ensure capabilities are updated and propagated to Telecom.
                     if (mOriginalConnectionExtras.containsKey(
                             ImsCallProfile.EXTRA_EXTENDING_TO_CONFERENCE_SUPPORTED)
                             || mOriginalConnectionExtras.containsKey(
@@ -2391,6 +2520,13 @@ abstract class TelephonyConnection extends Connection implements Holdable, Commu
         if (mOriginalConnection == null) {
             return;
         }
+
+        TelephonyManager tm = (TelephonyManager) getPhone().getContext()
+                .getSystemService(Context.TELEPHONY_SERVICE);
+        if (tm.isEmergencyNumber(mOriginalConnection.getAddress())) {
+            mTreatAsEmergencyCall = true;
+        }
+
         Call.State newState;
         // If the state is overridden and the state of the original connection hasn't changed since,
         // then we continue in the overridden state, else we go to the original connection's state.
@@ -2440,30 +2576,43 @@ abstract class TelephonyConnection extends Connection implements Holdable, Commu
                         fireOnOriginalConnectionRetryDial(cause
                                 == android.telephony.DisconnectCause.EMERGENCY_PERM_FAILURE);
                     } else {
-                        int preciseDisconnectCause = CallFailCause.NOT_VALID;
-                        if (mShowPreciseFailedCause) {
-                            preciseDisconnectCause =
-                                    mOriginalConnection.getPreciseDisconnectCause();
+                        if (mSsNotification != null) {
+                            setTelephonyConnectionDisconnected(
+                                    DisconnectCauseUtil.toTelecomDisconnectCause(
+                                    mOriginalConnection.getDisconnectCause(),
+                                    mOriginalConnection.getVendorDisconnectCause(),
+                                    mSsNotification.notificationType,
+                                    mSsNotification.code,
+                                    getPhone().getPhoneId()));
+                            mSsNotification = null;
+                            DisconnectCauseUtil.mNotificationCode = 0xFF;
+                            DisconnectCauseUtil.mNotificationType = 0xFF;
+                        } else {
+                            int preciseDisconnectCause = CallFailCause.NOT_VALID;
+                            if (mShowPreciseFailedCause) {
+                                preciseDisconnectCause =
+                                        mOriginalConnection.getPreciseDisconnectCause();
+                            }
+                            int disconnectCause = mOriginalConnection.getDisconnectCause();
+                            if ((mHangupDisconnectCause != DisconnectCause.NOT_VALID)
+                                    && (mHangupDisconnectCause != disconnectCause)) {
+                                Log.i(LOG_TAG, "setDisconnected: override cause: " + disconnectCause
+                                        + " -> " + mHangupDisconnectCause);
+                                disconnectCause = mHangupDisconnectCause;
+                            }
+                            ImsReasonInfo imsReasonInfo = null;
+                            if (isImsConnection()) {
+                                ImsPhoneConnection imsPhoneConnection =
+                                        (ImsPhoneConnection) mOriginalConnection;
+                                imsReasonInfo = imsPhoneConnection.getImsReasonInfo();
+                            }
+                            setTelephonyConnectionDisconnected(
+                                    DisconnectCauseUtil.toTelecomDisconnectCause(
+                                            disconnectCause,
+                                            preciseDisconnectCause,
+                                            mOriginalConnection.getVendorDisconnectCause(),
+                                            getPhone().getPhoneId(), imsReasonInfo));
                         }
-                        int disconnectCause = mOriginalConnection.getDisconnectCause();
-                        if ((mHangupDisconnectCause != DisconnectCause.NOT_VALID)
-                                && (mHangupDisconnectCause != disconnectCause)) {
-                            Log.i(LOG_TAG, "setDisconnected: override cause: " + disconnectCause
-                                    + " -> " + mHangupDisconnectCause);
-                            disconnectCause = mHangupDisconnectCause;
-                        }
-                        ImsReasonInfo imsReasonInfo = null;
-                        if (isImsConnection()) {
-                            ImsPhoneConnection imsPhoneConnection =
-                                    (ImsPhoneConnection) mOriginalConnection;
-                            imsReasonInfo = imsPhoneConnection.getImsReasonInfo();
-                        }
-                        setTelephonyConnectionDisconnected(
-                                DisconnectCauseUtil.toTelecomDisconnectCause(
-                                        disconnectCause,
-                                        preciseDisconnectCause,
-                                        mOriginalConnection.getVendorDisconnectCause(),
-                                        getPhone().getPhoneId(), imsReasonInfo));
                         close();
                     }
                     break;
@@ -2490,6 +2639,7 @@ abstract class TelephonyConnection extends Connection implements Holdable, Commu
         updateMultiparty();
         refreshDisableAddCall();
         refreshCodec();
+        maybeRemoveAnsweringDropsFgCallExtra();
     }
 
     /**
@@ -2502,7 +2652,6 @@ abstract class TelephonyConnection extends Connection implements Holdable, Commu
 
         if (mIsMultiParty != mOriginalConnection.isMultiparty()) {
             mIsMultiParty = mOriginalConnection.isMultiparty();
-
             if (mIsMultiParty) {
                 notifyConferenceStarted();
             }
@@ -2701,11 +2850,20 @@ abstract class TelephonyConnection extends Connection implements Holdable, Commu
                 (mOriginalConnectionCapabilities & Capability.SUPPORTS_VT_REMOTE_BIDIRECTIONAL)
                         == Capability.SUPPORTS_VT_REMOTE_BIDIRECTIONAL);
 
+        PersistableBundle pb = getCarrierConfig();
+        boolean vtTtySupported = false;
+        if(pb != null) {
+            vtTtySupported = pb.getBoolean(CarrierConfigManager.KEY_CARRIER_VT_TTY_SUPPORT_BOOL);
+        }
         boolean isLocalVideoSupported = (mOriginalConnectionCapabilities
                 & Capability.SUPPORTS_VT_LOCAL_BIDIRECTIONAL)
-                == Capability.SUPPORTS_VT_LOCAL_BIDIRECTIONAL && !mIsTtyEnabled;
+                == Capability.SUPPORTS_VT_LOCAL_BIDIRECTIONAL && (vtTtySupported || !mIsTtyEnabled);
         capabilities = changeBitmask(capabilities, CAPABILITY_SUPPORTS_VT_LOCAL_BIDIRECTIONAL,
                 isLocalVideoSupported);
+
+        capabilities = changeBitmask(capabilities, CAPABILITY_SUPPORTS_RTT_REMOTE,
+                (mOriginalConnectionCapabilities & Capability.SUPPORTS_RTT_REMOTE)
+                        == Capability.SUPPORTS_RTT_REMOTE);
 
         return capabilities;
     }
@@ -2930,10 +3088,20 @@ abstract class TelephonyConnection extends Connection implements Holdable, Commu
             int labelId = isValidRingingCall()
                     ? R.string.status_hint_label_incoming_wifi_call
                     : R.string.status_hint_label_wifi_call;
+            String displaySubId = "";
+            if (TelephonyManager.getDefault().getPhoneCount() > 1) {
+                final int phoneId = getPhone().getPhoneId();
+                SubscriptionInfo sub = SubscriptionManager.from(getPhone().getContext())
+                    .getActiveSubscriptionInfoForSimSlotIndex(phoneId);
+                if (sub != null) {
+                    displaySubId = sub.getDisplayName().toString();
+                    displaySubId  = " " + displaySubId;
+                }
+            }
 
             Context context = getPhone().getContext();
             setTelephonyStatusHints(new StatusHints(
-                    getResourceString(labelId),
+                    getResourceString(labelId) + displaySubId,
                     Icon.createWithResource(
                             context, R.drawable.ic_signal_wifi_4_bar_24dp),
                     null /* extras */));
@@ -3763,6 +3931,11 @@ abstract class TelephonyConnection extends Connection implements Holdable, Commu
                         .KEY_SUPPORTS_SDP_NEGOTIATION_OF_D2D_RTP_HEADER_EXTENSIONS_BOOL);
     }
 
+    private boolean hasActiveCallOnThisSub(ImsPhone imsPhone) {
+        // Active foreground call on same sub means same sub swap
+        return imsPhone.getForegroundCall().getState() == Call.State.ACTIVE;
+    }
+
     /**
      * Handles a device to device message which a {@link CallDiagnostics} wishes to send.
      * @param extras the call event extras bundle.
@@ -3809,5 +3982,15 @@ abstract class TelephonyConnection extends Connection implements Holdable, Commu
             set.add(new Communicator.Message(internalMessageType, internalMessageValue));
             mCommunicator.sendMessages(set);
         }
+    }
+
+    /* Disables context based swap to make use of new DSDA hold APIs */
+    public void disableContextBasedSwap(boolean contextBasedSwapDisabled) {
+        mContextBasedSwapDisabled = contextBasedSwapDisabled;
+    }
+
+    /* Determines if context based swap is disabled */
+    public boolean isContextBasedSwapDisabled() {
+        return mContextBasedSwapDisabled;
     }
 }

@@ -37,6 +37,7 @@ import java.util.Collections;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Objects;
 import java.util.stream.Collectors;
 
 /**
@@ -270,7 +271,8 @@ public class ImsConferenceController {
                 Log.d(this, "recalc - %s %s", conference.getState(), conference);
             }
 
-            if (!conference.isConferenceHost()) {
+            if (!conference.isConferenceHost() &&
+                    (!conference.isMultiAnchorConferenceSupported())) {
                 if (Log.VERBOSE) {
                     Log.v(this, "skipping conference (not hosted on this device): %s", conference);
                 }
@@ -300,10 +302,12 @@ public class ImsConferenceController {
 
         for (Conferenceable c : conferenceableSet) {
             if (c instanceof Connection) {
-                // Remove this connection from the Set and add all others
+                PhoneAccountHandle handle = getPhoneAccountHandle(c);
+                // Remove this connection from the Set and add ones with same PhoneAccountHandle
                 List<Conferenceable> conferenceables = conferenceableSet
                         .stream()
-                        .filter(conferenceable -> c != conferenceable)
+                        .filter(conferenceable -> c != conferenceable &&
+                        Objects.equals(handle, getPhoneAccountHandle(conferenceable)))
                         .collect(Collectors.toList());
                 // TODO: Remove this once RemoteConnection#setConferenceableConnections is fixed.
                 // Add all conference participant connections as conferenceable with a standalone
@@ -317,6 +321,7 @@ public class ImsConferenceController {
 
                 ((Connection) c).setConferenceables(conferenceables);
             } else if (c instanceof ImsConference) {
+                PhoneAccountHandle handle = getPhoneAccountHandle(c);
                 ImsConference imsConference = (ImsConference) c;
 
                 // If the conference is full, don't allow anything to be conferenced with it.
@@ -328,13 +333,26 @@ public class ImsConferenceController {
                 // to another conference.
                 List<Connection> connections = conferenceableSet
                         .stream()
-                        .filter(conferenceable -> conferenceable instanceof Connection)
+                        .filter(conferenceable -> conferenceable instanceof Connection &&
+                        Objects.equals(handle, getPhoneAccountHandle(conferenceable)))
                         .map(conferenceable -> (Connection) conferenceable)
                         .collect(Collectors.toList());
                 // Conference equivalent to setConferenceables that only accepts Connections
                 imsConference.setConferenceableConnections(connections);
             }
         }
+    }
+
+    /**
+     * Retrieves the PhoneAccountHandle for Conferenceable object
+     */
+    private PhoneAccountHandle getPhoneAccountHandle(Conferenceable c) {
+        if (c instanceof Connection) {
+            return ((Connection) c).getPhoneAccountHandle();
+        } else if (c instanceof ImsConference) {
+            return ((ImsConference) c).getPhoneAccountHandle();
+        }
+        return null;
     }
 
     /**
@@ -474,12 +492,18 @@ public class ImsConferenceController {
                     CarrierConfigManager.KEY_ALLOW_HOLD_IN_IMS_CALL_BOOL);
             boolean shouldLocalDisconnectOnEmptyConference = bundle.getBoolean(
                     CarrierConfigManager.KEY_LOCAL_DISCONNECT_EMPTY_IMS_CONFERENCE_BOOL);
+            boolean isMultiAnchorConferenceSupported = bundle.getBoolean(
+                    CarrierConfigManager.KEY_CARRIER_SUPPORTS_MULTIANCHOR_CONFERENCE);
+            boolean filterOutConferenceHost = !cfgManager.getConfigForSubId(phone.getSubId())
+                    .getBoolean("disable_filter_out_conference_host");
 
             config.setIsMaximumConferenceSizeEnforced(isMaximumConferenceSizeEnforced)
                     .setMaximumConferenceSize(maximumConferenceSize)
                     .setIsHoldAllowed(isHoldAllowed)
                     .setShouldLocalDisconnectEmptyConference(
-                            shouldLocalDisconnectOnEmptyConference);
+                            shouldLocalDisconnectOnEmptyConference)
+                    .setIsMultiAnchorConferenceSupported(isMultiAnchorConferenceSupported)
+                    .setFilterOutConferenceHost(filterOutConferenceHost);
         }
         return config.build();
     }

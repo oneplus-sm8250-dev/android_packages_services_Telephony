@@ -7,11 +7,14 @@ import android.content.Context;
 import android.os.Handler;
 import android.os.Message;
 import android.preference.SwitchPreference;
+import android.telephony.CarrierConfigManager;
 import android.telephony.TelephonyManager;
 import android.util.AttributeSet;
 import android.util.Log;
 
+import com.android.internal.telephony.CommandException;
 import com.android.internal.telephony.Phone;
+import com.android.internal.telephony.PhoneConstants;
 
 import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
@@ -28,6 +31,7 @@ public class CallWaitingSwitchPreference extends SwitchPreference {
     private boolean mIsDuringUpdateProcess = false;
     private int mUpdateStatus = TelephonyManager.CALL_WAITING_STATUS_UNKNOWN_ERROR;
     private int mQueryStatus = TelephonyManager.CALL_WAITING_STATUS_UNKNOWN_ERROR;
+    private boolean mUtEnabled = false;
 
     public CallWaitingSwitchPreference(Context context, AttributeSet attrs, int defStyle) {
         super(context, attrs, defStyle);
@@ -48,6 +52,7 @@ public class CallWaitingSwitchPreference extends SwitchPreference {
         mExecutor = Executors.newSingleThreadExecutor();
         mTelephonyManager = getContext().getSystemService(
                 TelephonyManager.class).createForSubscriptionId(phone.getSubId());
+        mUtEnabled = mPhone.isUtEnabled();
 
         if (!skipReading) {
             Log.d(LOG_TAG, "init getCallWaitingStatus");
@@ -80,6 +85,18 @@ public class CallWaitingSwitchPreference extends SwitchPreference {
         }
     }
 
+    public boolean isAutoRetrySsoverCdma() {
+        CarrierConfigManager cfgManager = (CarrierConfigManager)
+            getContext().getSystemService(Context.CARRIER_CONFIG_SERVICE);
+        boolean autoRetryCfu = false;
+        if (cfgManager != null) {
+            autoRetryCfu = cfgManager.getConfigForSubId(mPhone.getSubId())
+                .getBoolean("config_auto_retry_cfu_bool");
+        }
+        boolean isCdma = mPhone.getPhoneType() == PhoneConstants.PHONE_TYPE_CDMA;
+        return autoRetryCfu && isCdma && mUtEnabled && !mPhone.isUtEnabled();
+    }
+
     private class MyHandler extends Handler {
         static final int MESSAGE_UPDATE_CALL_WAITING = 0;
 
@@ -106,7 +123,9 @@ public class CallWaitingSwitchPreference extends SwitchPreference {
                             || mUpdateStatus
                             == TelephonyManager.CALL_WAITING_STATUS_UNKNOWN_ERROR)) {
                 Log.d(LOG_TAG, "handleSetCallWaitingResponse: Exception");
-                if (mTcpListener != null) {
+                if (isAutoRetrySsoverCdma()) {
+                    mUtEnabled = false;
+                } else if (mTcpListener != null) {
                     mTcpListener.onError(CallWaitingSwitchPreference.this, EXCEPTION_ERROR);
                 }
             } else if (mQueryStatus == TelephonyManager.CALL_WAITING_STATUS_NOT_SUPPORTED

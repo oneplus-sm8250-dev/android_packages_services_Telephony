@@ -3126,7 +3126,12 @@ public class PhoneInterfaceManager extends ITelephony.Stub {
         String tac = null;
         if (phone != null) {
             String imei = phone.getImei();
-            tac = imei == null ? null : imei.substring(0, TYPE_ALLOCATION_CODE_LENGTH);
+            try {
+                tac = imei == null ? null : imei.substring(0, TYPE_ALLOCATION_CODE_LENGTH);
+            } catch (IndexOutOfBoundsException e) {
+                Log.e(LOG_TAG, "IMEI length shorter than upper index.");
+                return null;
+            }
         }
         return tac;
     }
@@ -3158,7 +3163,13 @@ public class PhoneInterfaceManager extends ITelephony.Stub {
         String manufacturerCode = null;
         if (phone != null) {
             String meid = phone.getMeid();
-            manufacturerCode = meid == null ? null : meid.substring(0, MANUFACTURER_CODE_LENGTH);
+            try {
+                manufacturerCode =
+                        meid == null ? null : meid.substring(0, MANUFACTURER_CODE_LENGTH);
+            } catch (IndexOutOfBoundsException e) {
+                Log.e(LOG_TAG, "MEID length shorter than upper index.");
+                return null;
+            }
         }
         return manufacturerCode;
     }
@@ -7436,14 +7447,28 @@ public class PhoneInterfaceManager extends ITelephony.Stub {
         final long identity = Binder.clearCallingIdentity();
         try {
             boolean isRttSupported = isRttSupported(subscriptionId);
-            boolean isUserRttSettingOn = Settings.Secure.getInt(
-                    mApp.getContentResolver(), Settings.Secure.RTT_CALLING_MODE, 0) != 0;
+            boolean isUserRttSettingOn = isUserRttSettingOn(subscriptionId);
             boolean shouldIgnoreUserRttSetting = mApp.getCarrierConfigForSubId(subscriptionId)
                     .getBoolean(CarrierConfigManager.KEY_IGNORE_RTT_MODE_SETTING_BOOL);
             return isRttSupported && (isUserRttSettingOn || shouldIgnoreUserRttSetting);
         } finally {
             Binder.restoreCallingIdentity(identity);
         }
+    }
+
+    private boolean isUserRttSettingOn(int subscriptionId) {
+        int phoneId = SubscriptionManager.getPhoneId(subscriptionId);
+        if (!SubscriptionManager.isValidPhoneId(phoneId)) {
+            loge("phoneId " + phoneId + " is not valid.");
+            return false;
+        }
+        return Settings.Secure.getInt(
+                mApp.getContentResolver(),
+                Settings.Secure.RTT_CALLING_MODE + convertRttPhoneId(phoneId) , 0) != 0;
+    }
+
+    private static String convertRttPhoneId(int phoneId) {
+        return phoneId != 0 ? Integer.toString(phoneId) : "";
     }
 
     @Deprecated

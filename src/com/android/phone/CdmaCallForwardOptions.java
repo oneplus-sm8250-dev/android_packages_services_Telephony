@@ -149,11 +149,14 @@ public class CdmaCallForwardOptions extends TimeConsumingPreferenceActivity {
     public void onResume() {
         super.onResume();
 
+        // TODO(b/168714925) this variable is a placeholder
+        int tempServiceClass = 0;
+
         if (mFirstResume) {
             if (mIcicle == null) {
                 Log.d(LOG_TAG, "start to init ");
                 CallForwardEditPreference pref = mPreferences.get(mInitIndex);
-                pref.init(this, mPhone, mReplaceInvalidCFNumbers, mCallForwardByUssd);
+                pref.init(this, mPhone, mReplaceInvalidCFNumbers, tempServiceClass, mCallForwardByUssd);
                 pref.startCallForwardOptionsQuery();
 
             } else {
@@ -166,7 +169,7 @@ public class CdmaCallForwardOptions extends TimeConsumingPreferenceActivity {
                     CallForwardInfo cf = new CallForwardInfo();
                     cf.number = bundle.getString(KEY_NUMBER);
                     cf.status = bundle.getInt(KEY_STATUS);
-                    pref.init(this, mPhone, mReplaceInvalidCFNumbers, mCallForwardByUssd);
+                    pref.init(this, mPhone, mReplaceInvalidCFNumbers, tempServiceClass, mCallForwardByUssd);
                     pref.restoreCallForwardInfo(cf);
                 }
             }
@@ -193,10 +196,13 @@ public class CdmaCallForwardOptions extends TimeConsumingPreferenceActivity {
 
     @Override
     public void onFinished(Preference preference, boolean reading) {
+        // TODO(b/168714925) this variable is a placeholder
+        int tempServiceClass = 0;
+
         if (mInitIndex < mPreferences.size()-1 && !isFinishing()) {
             mInitIndex++;
             CallForwardEditPreference pref = mPreferences.get(mInitIndex);
-            pref.init(this, mPhone, mReplaceInvalidCFNumbers, mCallForwardByUssd);
+            pref.init(this, mPhone, mReplaceInvalidCFNumbers, tempServiceClass, mCallForwardByUssd);
             pref.startCallForwardOptionsQuery();
         }
 

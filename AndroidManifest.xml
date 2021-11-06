@@ -90,6 +90,15 @@
     <protected-broadcast android:name= "android.telephony.action.SIM_CARD_STATE_CHANGED" />
     <protected-broadcast android:name= "android.telephony.action.SIM_APPLICATION_STATE_CHANGED" />
     <protected-broadcast android:name= "android.telephony.action.SIM_SLOT_STATUS_CHANGED" />
+    <protected-broadcast android:name= "org.codeaurora.intent.action.SUBSCRIPTION_INFO_RECORD_ADDED" />
+    <protected-broadcast android:name= "org.codeaurora.intent.action.PRIMARY_CARD_CHANGED_IN_SERVICE" />
+    <protected-broadcast android:name= "org.codeaurora.intent.action.ACTION_SET_PRIMARY_CARD_DONE" />
+    <protected-broadcast android:name= "codeaurora.intent.action.ACTION_LTE_CONFIGURE" />
+    <protected-broadcast android:name= "org.codeaurora.intent.action.ACTION_UICC_MANUAL_PROVISION_STATUS_CHANGED" />
+    <protected-broadcast android:name= "org.codeaurora.intent.action.ACTION_RADIO_CAPABILITY_UPDATED" />
+    <protected-broadcast android:name= "org.codeaurora.intent.action.ACTION_NETWORK_SPECIFIER_SET" />
+    <protected-broadcast android:name= "org.codeaurora.intent.action.ACTION_DDS_SWITCH_DONE" />
+    <protected-broadcast android:name= "org.codeaurora.intent.action.RADIO_POWER_STATE" />
     <protected-broadcast android:name= "android.telephony.action.SUBSCRIPTION_CARRIER_IDENTITY_CHANGED" />
     <protected-broadcast android:name= "android.telephony.action.SUBSCRIPTION_SPECIFIC_CARRIER_IDENTITY_CHANGED" />
     <protected-broadcast android:name= "android.telephony.action.TOGGLE_PROVISION" />
@@ -104,12 +113,12 @@
 
     <protected-broadcast android:name= "com.android.phone.settings.CARRIER_PROVISIONING" />
     <protected-broadcast android:name= "com.android.phone.settings.TRIGGER_CARRIER_PROVISIONING" />
+    <protected-broadcast android:name= "org.codeaurora.telephony.VOWIFI_ENABLED" />
 
     <!-- For Vendor Debugging in Telephony -->
     <protected-broadcast android:name="android.telephony.action.ANOMALY_REPORTED" />
 
     <protected-broadcast android:name= "android.intent.action.SUBSCRIPTION_INFO_RECORD_ADDED" />
-    <protected-broadcast android:name= "android.intent.action.ACTION_MANAGED_ROAMING_IND" />
     <protected-broadcast android:name= "android.telephony.ims.action.RCS_SINGLE_REGISTRATION_CAPABILITY_UPDATE" />
 
     <!-- Allows granting runtime permissions to telephony related components. -->
@@ -238,6 +247,13 @@
 
     <!-- Needed to listen to changes in projection state. -->
     <uses-permission android:name="android.permission.READ_PROJECTION_STATE"/>
+
+    <uses-permission android:name="com.qti.permission.BIND_QTI_IMS_SERVICE" />
+    <uses-permission android:name="com.qualcomm.qti.permission.USE_EXT_TELEPHONY_SERVICE" />
+    <uses-permission android:name="com.qti.permission.RECEIVE_SMS_CALLBACK_MODE" />
+    <!-- Allows us to know if concurrent calls on both subs are possible by handling broadcast
+         intent "org.codeaurora.intent.action.MSIM_VOICE_CAPABILITY".-->
+    <uses-permission android:name="com.qti.permission.RECEIVE_MSIM_VOICE_CAPABILITY" />
 
     <application android:name="PhoneApp"
             android:persistent="true"
@@ -377,6 +393,16 @@
                 android:label="@string/labelGSMMore"
                 android:configChanges="orientation|screenSize|keyboardHidden"
                 android:exported="true"
+                android:theme="@style/DialerSettingsLight">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+            </intent-filter>
+        </activity>
+
+        <activity android:name="CallForwardType"
+                android:exported="true"
+                android:label="@string/call_forward_option"
+                android:configChanges="orientation|screenSize|keyboardHidden"
                 android:theme="@style/DialerSettingsLight">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -569,6 +595,17 @@
             </intent-filter>
         </activity>
 
+        <activity android:name="LimitedServiceActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:launchMode="singleTask"
+            android:taskAffinity=""
+            android:theme="@android:style/Theme.Translucent.NoTitleBar">
+            <intent-filter android:priority="1000">
+                <action android:name = "org.codeaurora.telephony.VOWIFI_ENABLED" />
+            </intent-filter>
+        </activity>
+
         <!-- Start SIP -->
         <service android:name="com.android.services.telephony.sip.SipConnectionService"
                  android:label="@string/sip_connection_service_label"
@@ -740,5 +777,8 @@
             android:multiprocess="false"
             android:singleUser="true"
             android:writePermission="android.permission.MODIFY_PHONE_STATE"/>
+
+        <uses-library android:name="ims-ext-common"/>
+        <uses-library android:name="com.qti.extphone.extphonelib"/>
     </application>
 </manifest>
