@@ -41,8 +41,12 @@ android_app {
         "ims-common",
         "libprotobuf-java-lite",
         "unsupportedappusage",
+        "telephony-ext",
+         "extphonelib",
+        "ims-ext-common",
         "org.apache.http.legacy",
     ],
+    enforce_uses_libs: false,
 
     static_libs: [
         "androidx.appcompat_appcompat",
